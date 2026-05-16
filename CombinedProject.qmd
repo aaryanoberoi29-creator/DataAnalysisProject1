@@ -1,0 +1,715 @@
+---
+title: "DataProject"
+author: "Aaryan Oberoi (43398940)"
+date: last-modified
+format:
+  html:
+    embed-resources: true
+    df-print: paged
+    html-math-method: mathml
+execute:
+  echo: true
+  cache: true
+---
+
+```{r}
+library(dplyr)
+library(rsample)
+library(ggplot2)
+library(tidyr)
+library(car)
+library(class)
+library(Metrics)
+library(knitr)
+library(tree)
+library(randomForest)
+library(glmnet)
+library(gbm)
+
+obesity <- read.csv("data/ObesityDataSet_raw_and_data_sinthetic.csv")
+```
+
+# Linear Regression
+
+### Description:
+
+This dataset (on obesity) includes data for the estimation of obesity levels in individuals from the countries of Mexico, Peru and Colombia, based on their eating habits and physical condition. 77% of the data was generated synthetically using the Weka tool and the SMOTE filter, 23% of the data was collected directly from users through a web platform.
+
+### Format:
+
+- There are `r nrow(obesity)` rows and `r ncol(obesity)` columns.
+
+- Summary of Variables:
+
+```{r}
+#| code-fold: true
+#Analysing Variables
+
+variable_sum <- data.frame(Name=names(obesity))
+variable_sum$Data_Type <- c("factor","numeric (years)","numeric (meters)","numeric (kg)","factor","factor","ordered factor","ordered factor","ordered factor","factor","ordered factor (liters)","factor","ordered factor (days)","ordered factor (hours)","ordered factor","factor","ordered factor")
+variable_sum$Description <- c("","","","",
+                              "Has a family member suffered or suffers from overweight?",
+                              "Do you eat high caloric food frequently?",
+                              "Do you usually eat vegetables in your meals?",
+                              "How many main meals do you have daily?",
+                              "Do you eat any food between meals?",
+                              "Do you smoke?",
+                              "How much water do you drink daily?",
+                              "Do you monitor the calories you eat daily?",
+                              "How often do you have physical activity?",
+                              "How much time do you use technological devices such as cell phone, videogames, television, computer and others?",
+                              "How often do you drink alcohol?",
+                              "Which transportation do you usually use?",
+                              "Obesity level"
+                              )
+kable(variable_sum)
+```
+
+- You can access the [source](https://archive.ics.uci.edu/dataset/544/estimation+of+obesity+levels+based+on+eating+habits+and+physical+condition) here.
+
+We will use this data to explore and evaluate linear regression. Let us clean the data first.
+
+### Cleaning Data
+
+```{r}
+#| code-fold: true
+
+#Cleaning data and changing data types of columns to the appropriate ones
+obesity <- mutate(obesity,
+                  NCP = case_when(
+                    NCP<3 ~ 1,
+                    NCP<4 ~ 3,
+                    NCP>=4 ~ 4
+                  ),
+                  CH2O = case_when(
+                    CH2O<1 ~ 0,
+                    CH2O<=2 ~ 1,
+                    CH2O>2 ~ 2
+                  ),
+                  FAF = case_when(
+                    FAF==0 ~ 0,
+                    FAF<2 ~ 1,
+                    FAF<4 ~ 2,
+                    FAF>=4 ~ 3
+                  ),
+                  TUE = case_when(
+                    TUE<=2 ~ 0,
+                    TUE<=5 ~ 1,
+                    TUE>5 ~ 2
+                  )
+                  )
+obesity <- mutate(obesity,
+                  Gender = factor(Gender),
+                  family_history_with_overweight = factor(family_history_with_overweight),
+                  FAVC = factor(FAVC),
+                  FCVC = ordered(floor(FCVC),levels = c(1,2,3),labels = c("Never","Sometimes","Always")),
+#I took floor of FCVC as I found non-integral values like 2.345.. which didnt make sense to me and seemed like a flaw in the data set. Was unsure what to do.
+                  NCP = ordered(NCP,levels=c(1,3,4),labels=c("Between 1 and 2","3","More than 3")),
+                  CAEC = ordered(CAEC,levels=c("no","Sometimes","Frequently","Always")),
+                  SMOKE = factor(SMOKE),
+                  CH2O = ordered(CH2O,levels=c(0,1,2),labels=c("Less than 1","Between 1 and 2","More than 2")),
+                  SCC = factor(SCC),
+                  FAF = factor(FAF,levels = c(0,1,2,3),labels = c("I do not","1-2 days","2-4 days","4-5 days"),ordered = TRUE),
+TUE = factor(TUE,levels = c(0,1,2),labels = c("0-2 hours","3-5 hours","More than 5 hours"),ordered = TRUE),
+CALC = factor(CALC,levels = c("no","Sometimes","Frequently","Always"),ordered = TRUE),
+MTRANS = factor(MTRANS),
+NObeyesdad = factor(NObeyesdad, levels = c("Insufficient_Weight","Normal_Weight","Overweight_Level_I","Overweight_Level_II","Obesity_Type_I","Obesity_Type_II","Obesity_Type_III"),ordered = TRUE)
+                  )
+obesity
+```
+
+Checking for NA values and Duplicates
+
+```{r}
+na <- sum(is.na(obesity))
+dups <- sum(duplicated(obesity))
+```
+
+So, there are `r na` NA values and `r dups` duplicate rows
+
+It does not make sense to remove the duplicates because there is no Variable that should be inherently unique (like ID) and it is completely feasible to have multiple people having the same attributes in a large sample like this. Removing the "duplicates" would take away the frequency of those entries.
+
+```{r}
+
+#We will use this as our output instead of NObeyesdad (ord factor) because we want to explore Regression, not Classification 
+obesity$BMI = obesity$Weight/(obesity$Height)^2
+```
+
+### Exploring relationships of Variables (Inputs) with BMI
+
+```{r}
+ggplot(obesity, aes(x=Age,y=BMI)) + geom_point(color="blue",alpha=0.5) + geom_smooth(method = "lm")
+```
+
+There appears to be some very weak (almost non-existent) positive correlation between BMI and Age during the initial ages and it become a negative correlation after the age of 45 or 50. I do not think a linear model would be appropriate to use in this case.
+
+Unordered Categories:
+
+```{r}
+#| code-fold: true
+#| fig-width: 10
+#| fig-height: 7
+#NObeyesdad is an ordered categorical variable and not unordered (written incorrectly in exercise)
+obesity1 =  select(obesity,family_history_with_overweight, FAVC, SMOKE, SCC, MTRANS,BMI) %>% pivot_longer(
+    cols = c(family_history_with_overweight, FAVC, SMOKE, SCC, MTRANS),
+    names_to = "Variable",
+    values_to = "Category"
+  )
+ggplot(obesity1,aes(x = Category, y = BMI, fill = Category)) + geom_boxplot() +
+  facet_wrap(~ Variable, scales = "free_x") +
+  labs(title = "Boxplots of BMI Across Unordered Categorical Variables", x="Unordered Categories", y = "BMI") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_blank()) 
+```
+
+Ordered Categories:
+
+```{r}
+#| code-fold: true
+#| fig-width: 4
+#| fig-height: 3
+vars = c("FCVC", "NCP", "CAEC", "CH2O", "FAF", "TUE", "CALC","NObeyesdad")
+for (var in vars) {
+  print(
+  ggplot(obesity, aes(x = .data[[var]], y = BMI, fill = .data[[var]])) +
+      geom_boxplot() +
+      labs(title = paste("Boxplot of BMI by", var),
+           x = var, y = "BMI") + theme(axis.text.x = element_blank())
+  )
+}
+```
+
+family_history_with_overweight may be predictive of BMI as we can see that the BMIs of yes and no overlap the least (compared to other categories)
+
+### Training Linear Regression Models and Evaluating them
+
+```{r}
+set.seed(43398940)
+obesity_split <- initial_split(obesity, prop = 0.7)
+obesity_train <- training(obesity_split)
+obesity_test  <- testing(obesity_split)
+
+train_row <- nrow(obesity_train)
+test_row <- nrow(obesity_test)
+```
+
+There are `r train_row` observations in the Training set and `r test_row` observations in the Test set
+
+```{r}
+slr <- lm(BMI ~ Age, data = obesity_train)
+#Single predictor regression model
+summary(slr)
+```
+
+The slr equation comes out to be BMI = 22.95 + 0.28\*Age
+
+We can interpret this as for someone of Age 0, BMI is 22.95 (may not work in real world data) and for every additional year of Age BMI increases by 0.28
+
+```{r}
+#Using all predictors for this model
+fmlr <- lm(BMI ~ Gender + Age + family_history_with_overweight + FAVC + FCVC + NCP + CAEC + SMOKE + CH2O + SCC + FAF + CALC + MTRANS, data = obesity_train)
+#Did not include TUE as all its enteries fit as one category only, so it gives no information at all. Additionally it raises an error when trying to fit using lm because "one category only"
+vif(fmlr)
+```
+
+It appears that there is no problematic multicollinearity as the VIF values are less than 5.
+
+```{r}
+mlr1 <- lm(BMI ~ Age + Gender + family_history_with_overweight,data = obesity_train)
+summary(mlr1)
+mlr2 <- lm(BMI ~ Age + Gender + family_history_with_overweight + FAVC,data = obesity_train)
+summary(mlr2)
+```
+
+Adjusted R\^2 has improved and the new variable has a very small p value i.e. the new variable is highly predictive.
+
+Parallel Lines Model:
+
+```{r}
+parallel_lr <- lm(BMI ~ Age + Gender,data = obesity_train)
+coeffs_p <- coef(parallel_lr)
+```
+
+BMI =\
+if female: `r coeffs_p[1]` + `r coeffs_p[2]`\*Age\
+if male: `r coeffs_p[1]+coeffs_p[3]` + `r coeffs_p[2]`\*Age\
+(formula that the model uses to predict)
+
+```{r}
+nparallel_lr <- lm(BMI ~ Age * Gender,data = obesity_train)
+summary(nparallel_lr)
+coeffs_np <- coef(nparallel_lr)
+```
+
+BMI =\
+if female: `r coeffs_np[1]` + `r coeffs_np[2]`\*Age\
+if male: `r coeffs_np[1]+coeffs_np[3]` + `r coeffs_np[2]+coeffs_np[4]`\*Age
+
+The p-value of the interaction term is very low, i.e, the interaction term is very relevant. Which means that the effect of Age on BMI is significantly different for each Gender.
+
+```{r}
+#| code-fold: true
+ggplot(obesity_train, aes(x = Age, y = BMI, color = Gender)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(
+    intercept = coeffs_np[1],
+    slope     = coeffs_np[2],
+    color = "hotpink"
+  ) +
+  geom_abline(
+    intercept = coeffs_np[1] + coeffs_np[3],
+    slope     = coeffs_np[2] + coeffs_np[4],
+    color = "blue"
+  )
+```
+
+```{r}
+predict(nparallel_lr, newdata = data.frame(Age = 38, Gender = "Female"))
+coeffs_np[1]+coeffs_np[2]*38
+```
+
+```{r}
+#| code-fold: true
+
+results <- data.frame(
+  Model = c("SLR","Full Model","MLR","Parallel Lines","Non-parallel Lines"),
+  Adjust_R2 = c(
+    summary(slr)$adj.r.squared,
+    summary(fmlr)$adj.r.squared,
+    summary(mlr2)$adj.r.squared,
+    summary(parallel_lr)$adj.r.squared,
+    summary(nparallel_lr)$adj.r.squared
+    ),
+  MSE_Train = c(
+    mse(obesity_train$BMI,predict(slr,newdata=obesity_train)),
+    mse(obesity_train$BMI,predict(fmlr,newdata=obesity_train)),
+    mse(obesity_train$BMI,predict(mlr2,newdata=obesity_train)),
+    mse(obesity_train$BMI,predict(parallel_lr,newdata=obesity_train)),
+    mse(obesity_train$BMI,predict(parallel_lr,newdata=obesity_train))
+    ),
+  MSE_Test = c(
+    mse(obesity_test$BMI,predict(slr,newdata=obesity_test)),
+    mse(obesity_test$BMI,predict(fmlr,newdata=obesity_test)),
+    mse(obesity_test$BMI,predict(mlr2,newdata=obesity_test)),
+    mse(obesity_test$BMI,predict(parallel_lr,newdata=obesity_test)),
+    mse(obesity_test$BMI,predict(parallel_lr,newdata=obesity_test))
+    )
+)
+kable(results, caption = "Model Comparison Summary")
+```
+
+In terms of prediction only, the Full Model performed the best as it has the lowest MSE Test (by a significant amount). We can even see that it has the best Adjusted R\^2 and MSE Train as well.
+
+# Classification
+
+### Cleaning Data
+
+```{r}
+#| code-fold: true
+
+dataChurn <- read.csv("data/WA_Fn-UseC_-Telco-Customer-Churn.csv")
+dataChurn <- mutate(dataChurn,
+                    gender= factor(gender),
+                    SeniorCitizen= factor(SeniorCitizen),
+                    Partner= factor(Partner),
+                    Dependents= factor(Dependents),
+                    PhoneService= factor(PhoneService),
+                    MultipleLines= factor(MultipleLines),
+                    InternetService= factor(InternetService),
+                    OnlineSecurity= factor(OnlineSecurity),
+                    OnlineBackup= factor(OnlineBackup),
+                    DeviceProtection= factor(DeviceProtection),
+                    TechSupport= factor(TechSupport),
+                    StreamingTV= factor(StreamingTV),
+                    StreamingMovies= factor(StreamingMovies),
+                    Contract= factor(Contract),
+                    PaperlessBilling= factor(PaperlessBilling),
+                    PaymentMethod= factor(PaymentMethod),
+                    Churn= factor(Churn)
+                    )
+dataChurn <- na.omit(dataChurn)
+str(dataChurn)
+```
+
+```{r}
+ggplot(dataChurn, aes(x = Churn, fill=Churn)) +
+  geom_bar() +
+  labs(title = "Churn Distribution",
+       x = "Churn Status",
+       y = "Count") +
+  theme_minimal()
+```
+
+The classes are imbalanced. We have a lot more data of people who did not Churn compared to those who have. However, this imbalance may reflect the imbalance of Churning in real world so it may not have a significant negative impact on modeling.
+
+### Exploring Relations of Churn with Predictors
+
+```{r, fig.width=5, fig.height=3}
+#| code-fold: true
+ggplot(dataChurn, aes(x = SeniorCitizen, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Senior Citizen", y = "Proportion") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x = Partner, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Partner", y = "Proportion") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x = Dependents, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Dependents", y = "Proportion") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x = PhoneService, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Phone Service", y = "Proportion") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x = MultipleLines, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Multiple Lines", y = "Proportion") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x = InternetService, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Internet Service", y = "Proportion") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x = OnlineSecurity, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Online Security", y = "Proportion") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x = OnlineBackup, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Online Backup", y = "Proportion") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x = DeviceProtection, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Device Protection", y = "Proportion") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x = TechSupport, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Tech Support", y = "Proportion") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x = StreamingTV, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Streaming TV", y = "Proportion") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x = StreamingMovies, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Streaming Movies", y = "Proportion") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x = Contract, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Contract", y = "Proportion") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x = PaperlessBilling, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Paperless Billing", y = "Proportion") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x = PaymentMethod, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(x = "Payment Method", y = "Proportion") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = -20, hjust = 0))
+```
+
+The following variables have some association with Churn:\
+SeniorCitizen, Partner, Dependents, InternetService, OnlineSecurity, OnlineBackup, DeviceProtection, TechSupport, Contract, PaperlessBilling, PaymentMethod.
+
+```{r, fig.width=5, fig.height=3}
+#| code-fold: true
+
+ggplot(dataChurn, aes(x=Churn, y=tenure, fill=Churn)) +
+  geom_boxplot() +
+  labs(x="Churn",y="Tenure (months)") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x=Churn, y=MonthlyCharges, fill=Churn)) +
+  geom_boxplot() +
+  labs(x="Churn",y="Monthly Charges ($)") +
+  theme_minimal()
+
+ggplot(dataChurn, aes(x=Churn, y=TotalCharges, fill=Churn)) +
+  geom_boxplot() +
+  labs(x="Churn",y="Total Charges ($)") +
+  theme_minimal()
+```
+
+All 3 seem to be associated with customer Churn.
+
+### Logistic Regression Models (Binary Classification)
+
+```{r}
+set.seed(43398940)
+n <- nrow(dataChurn)
+train <- sample(n,round(.7*n))
+test <- setdiff(1:n,train)
+train_data = dataChurn[train,]
+test_data = dataChurn[test,]
+```
+
+```{r}
+logfit <- glm(Churn ~ tenure+MonthlyCharges+TotalCharges, family = "binomial", data=train_data)
+logfit_pred = predict(logfit, newdata = test_data, type="response")
+logfit_pred = factor(logfit_pred>0.5, levels= c(FALSE, TRUE), labels=c("No", "Yes"))
+summary(logfit)
+```
+
+As MonthlyCharges and TotalCharges increase, the likelihood of Churning increases and as tenure increases, the likelihood of Churning decreases.
+
+```{r}
+logfit2 <- glm(Churn ~ SeniorCitizen + Partner + Dependents + OnlineBackup + Contract + PaperlessBilling + PaymentMethod + tenure+MonthlyCharges+TotalCharges
+               , family = "binomial", data=train_data)
+#Included all predictors that seemed to have a significant impact on Churning according to the graphs
+logfit2_pred = predict(logfit2, newdata = test_data, type="response")
+logfit2_pred = factor(logfit2_pred>0.5, levels= c(FALSE, TRUE), labels=c("No", "Yes"))
+summary(logfit2)
+```
+
+### KNN Classification Model
+
+```{r}
+#| code-fold: true
+
+train_x = model.matrix(Churn ~ SeniorCitizen + OnlineBackup + Contract + 
+                        PaperlessBilling + PaymentMethod + tenure + 
+                        MonthlyCharges + TotalCharges, data = train_data)[,-1]
+train_y = train_data$Churn
+test_x = model.matrix(Churn ~ SeniorCitizen + OnlineBackup + Contract + 
+                        PaperlessBilling + PaymentMethod + tenure + 
+                        MonthlyCharges + TotalCharges, data = test_data)[,-1]
+test_y = test_data$Churn
+```
+
+```{r}
+knn10_pred = knn(train_x, test_x, train_y, k=10)
+knn10_pred = factor(knn10_pred, levels = levels(test_y))
+
+k_values = seq(1, 50, by = 2)  # odd numbers to avoid ties
+errors = sapply(k_values, function(k) {
+  pred = knn(train = train_x, test = test_x, cl = train_y, k = k)
+  mean(pred != test_y)  
+})
+best_k = k_values[which.min(errors)]
+knn_best_pred = knn(train_x, test_x, train_y, k=best_k)
+knn_best_pred = factor(knn_best_pred, levels = levels(test_y))
+```
+
+### Comparing Test Error
+
+```{r}
+#| code-fold: true
+
+results = data.frame(
+  Model = c("Logistic 1", "Logistic 2", "KNN (k=10)", "KNN (best k)"),
+  Test_Error = c(
+    mean(logfit_pred != test_y),
+    mean(logfit2_pred != test_y),
+    mean(knn10_pred != test_y),
+    mean(knn_best_pred != test_y)
+  )
+)
+kable(results)
+```
+
+We can see that our second Logistic Regression model performed the best in this case
+
+# Trees and Ensamble Methods
+
+### Data Wrangling
+
+```{r}
+data = read.csv("data/datasalaries.csv")
+#Classification can also be done using these models but here we are focusing on Regression
+
+data = mutate(data,
+              company = factor(company),
+              gender = factor(gender),
+              Race = factor(Race),
+              Education = ordered(Education, labels = c("Highschool","Some College","Bachelor's Degree","Master's Degree","PhD"))
+              )
+data = na.omit(data)
+str(data)
+```
+
+`r nrow(data)` observations remain after making all necessary adjustments.
+
+```{r}
+set.seed(43398940)
+n <- nrow(data)
+train <- sample(n,round(.5*n))
+test <- setdiff(1:n,train)
+train_data = data[train,]
+test_data = data[test,]
+```
+
+### Tree Models
+
+```{r}
+#| fig-width: 10
+#| fig-height: 6
+tree1 = tree(salary~., data=train_data)
+plot(tree1); text(tree1)
+tree1
+```
+
+The first three nodes are yearsofexperience and company, which implies that these are the most significant predictors. We can also see that the companies - Amazon, Microsoft, Oracle - tend to pay less than the companies - Apple, Facebook, Google.
+
+```{r}
+tree1_cv = cv.tree(tree1)
+plot(tree1_cv, type="b")
+```
+
+So, the tree is already in the best size according to C.V.
+
+```{r}
+tree1_pred = predict(tree1, newdata=test_data)
+tree1_test_rmse = sqrt(mean((test_data$salary-tree1_pred)^2))
+```
+
+The test RMSE for this tree is `r tree1_test_rmse`.
+
+### Random Forest Model
+
+```{r}
+set.seed(43398940*5)
+#here mtry is no. of predictors/3 by default. This means that for every tree in the "forest", only 2 predictors are considered (randomly)
+rf1 = randomForest(salary~., data=train_data, ntree=500, importance=TRUE)
+```
+
+```{r}
+#| code-fold: true
+
+rf1_rms = rf1$mse[length(rf1$mse)]
+rf1_oob_rmse = sqrt(rf1_rms*nrow(train_data))
+rf1_pred = predict(rf1, newdata = test_data)
+rf1_test_rmse = sqrt(mean((test_data$salary - rf1_pred)^2))
+```
+
+The test error is `r rf1_test_rmse` and the OOB estimate is `r rf1_oob_rmse`
+
+```{r}
+varImpPlot(rf1)
+```
+
+So, yearsofexperience is the most important predictor
+
+### Bagging
+
+```{r}
+
+set.seed(43398940/2)
+#All predictors will be considered at every tree in this model
+bag1 = randomForest(salary~., data=train_data, ntree=500, mtry=ncol(data)-1, importance=TRUE)
+```
+
+```{r}
+#| code-fold: true
+
+bag1_rms = bag1$mse[length(bag1$mse)]
+bag1_oob_rmse = sqrt(bag1_rms*nrow(train_data))
+bag1_pred = predict(bag1, newdata = test_data)
+bag1_test_rmse = sqrt(mean((test_data$salary - bag1_pred)^2))
+```
+
+The test error is `r bag1_test_rmse` and the OOB estimate is `r bag1_oob_rmse`
+
+```{r}
+varImpPlot(bag1)
+```
+
+company has the highest %IncMSE, which means that if we do not use it as a predictor, Error increases the most, i.e., it is our most reliable predictor.\
+yearsofexperience has the highest IncNodePurity, which means experience strongly separates groups with different predicted values.
+
+### Boosting Models
+
+```{r}
+#Have not optimised parameters yet but that can be done using cv
+boost <- gbm(salary ~ ., data = train_data, distribution = "gaussian",
+                     n.trees = 100, interaction.depth = 3, shrinkage = 0.1, cv.folds = 5)
+summary(boost)
+
+boost_pred <- predict(boost, newdata = test_data, n.trees = 100)
+boost_mse <- mean((boost_pred - test_data$salary)^2)
+```
+
+The test error is `r boost_mse`
+
+### Comparing Models
+
+```{r}
+results_trees = data.frame(
+  Models = c("Single Tree", "Random Forest", "Bagging", "Boosting"),
+  Test_Error = c(tree1_test_rmse, rf1_test_rmse, bag1_test_rmse, boost_mse)
+)
+#Boosting did not perform as well because of parameters
+results_trees
+```
+
+# Ridge and Lasso Regression
+
+
+```{r}
+mtrx = model.matrix(salary ~ ., data = train_data)[, -1]
+```
+
+```{r}
+ridge1 = glmnet(mtrx,train_data$salary,alpha = 0)
+```
+
+```{r}
+set.seed(43398940+2025)
+cv_ridge2 = cv.glmnet(mtrx,train_data$salary,alpha = 0)
+best_lamb = cv_ridge2$lambda.min
+```
+
+```{r}
+mtrx_test = model.matrix(salary ~ ., data = test_data)[, -1]
+ridge2_pred = predict(cv_ridge2, s=best_lamb, newx=mtrx_test)
+ridge2_test_rmse = sqrt(mean((test_data$salary-ridge2_pred)^2))
+```
+
+The test rmse with lambda = `r round(best_lamb,2)` is `r ridge2_test_rmse`.
+
+```{r}
+lamb1 = cv_ridge2$lambda.1se
+ridge2_pred2 = predict(cv_ridge2, s=lamb1, newx=mtrx_test)
+ridge1se_test_rmse = sqrt(mean((test_data$salary-ridge2_pred2)^2))
+```
+
+The test rmse for Ridge 1se is `r ridge1se_test_rmse`.
+
+```{r}
+lasso1 = glmnet(mtrx,train_data$salary,alpha = 1)
+```
+
+```{r}
+set.seed(433989400)
+cv_lasso2 = cv.glmnet(mtrx,train_data$salary,alpha = 1)
+best_lamb2 = cv_lasso2$lambda.min
+```
+
+```{r}
+lasso2_pred = predict(cv_lasso2, s=best_lamb2, newx=mtrx_test)
+lasso2_test_rmse = sqrt(mean((test_data$salary-lasso2_pred)^2))
+```
+
+The test rmse with lambda = `r round(best_lamb2,2)` is `r lasso2_test_rmse`.
+
+```{r}
+lamb2 = cv_lasso2$lambda.1se
+lasso2_pred2 = predict(cv_lasso2, s=lamb2, newx=mtrx_test)
+lasso1se_test_rmse = sqrt(mean((test_data$salary-lasso2_pred2)^2))
+```
+
+The test rmse for Lasso 1se is `r lasso1se_test_rmse`.
